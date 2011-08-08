@@ -1,0 +1,129 @@
+from lxml.html import *
+from cgi import parse_qs
+from itertools import izip
+import json
+import os
+import commands
+from pymongo import *
+from bson.code import *
+
+
+def application(environ, start_response):
+    #connect to the DB
+    connection = Connection('localhost',27017)
+    #get a DB instance
+    db = connection['scrapy']
+    #get a collection instance from the DB (collection =~ table in SQL) 
+    collection = db['items']
+    
+    status = '200 OK'
+    response_headers = [('Content-type', 'text/html')]
+    start_response(status, response_headers)
+    
+    #Fetching the values sent using GET
+    recieved = parse_qs(environ['QUERY_STRING'])
+
+    # we create a dict from the list obtained from the QUERY string
+    parameter = dict()
+    
+    #retrieving the data parameters of the get query
+    for i in recieved:
+        parameter[i] = recieved[i][0]
+    url = parameter['url']
+    url2 =" "
+    lang = parameter['lang'] #lang stands for the "rec" attribute
+
+
+    #opening the database(file) containing meta-data of existing re-narrations
+    f = open('/var/www/wsgi/a11ypi_dict.json','r')
+    temp = f.read()
+    f.close()
+
+    #convert the string to a python dict
+    myJSONObject = json.loads(temp, object_hook=dict)
+    # myJSONObject = {'http://a11y.in/a11ypi/idea/firesafety.html': {'lang.hi': {'div1': 'http://a11y.in/a11ypi/idea/fire-hi.html:hi'},
+    #                                                'lang.kn': {'div1': 'http://a11y.in/a11ypi/idea/fire-kn.html:kn',
+    #                                                            'image1': 'http://a11y.in/a11ypi/idea/fire-kn.html:img1'}
+    #                                                }
+    #                 }
+    
+    # #clear the cache
+    # try:                                                                                                                              
+    #     if(os.path.getmtime('/var/www/wsgi/a11ypi_dict.json') > os.path.getmtime('/var/www/wsgi/'+ parameter['url'].split(':')[1].split('//')[1] + parameter['lang'])):
+    #         commands.getoutput('rm /var/www/wsgi/'+ parameter['url'].split(':')[1].split('//')[1] + parameter['lang'])
+    # except OSError:
+    #     pass
+
+    #checking whether or not the file exists in the cache, if so, return it
+    # try:
+    #     #f = open("%s%s" % (os.path.abspath(os.path.dirname(__file__)), parameter['url'] + '.' + parameter['lang'] ,'r'))
+    #     f = open(os.path.join(os.path.dirname(__file__), parameter['url'].split(':')[1].split('//')[1] + parameter['lang']), 'r')
+    #     output = f.read()
+    #     f.close()
+    #     return [output]
+        
+    # #making re-narrations for a particular elementl
+    # except IOError:
+    
+    #get the source code of the url
+    root = parse(url).getroot()
+
+    #check if this url is present in the file (database)
+    if myJSONObject.has_key(url):
+            
+        #check the lang attribute (recommendation)
+        if myJSONObject[url].has_key(lang):
+            for key in myJSONObject[url][lang].keys():
+                # blogspot url
+                url2 = myJSONObject[url][lang][key].rsplit(":",1)[0]
+                root2 = parse(url2).getroot()
+                #id of re-narration element in blog
+                element = myJSONObject[url][lang][key].rsplit(":",1)[1]
+                if root2.get_element_by_id(element).tag == 'audio':
+                    root.get_element_by_id(key).insert(0, root2.get_element_by_id(element))
+                    continue
+                if root.get_element_by_id(key).tag == 'img':
+                    root.get_element_by_id(key).attrib['src'] = root2.get_element_by_id(element).attrib['src']
+                elif root.get_element_by_id(key).tag == 'ul' or root.get_element_by_id(key).tag == 'ol':
+                    for i,j in izip(root.get_element_by_id(key).iterchildren(),root2.get_element_by_id(element).iterchildren()):
+                        i.text = j.text
+                elif root.get_element_by_id(key).getchildren() != []:
+                    if root2.get_element_by_id(element).getchildren() == []:
+                        for i in root.get_element_by_id(key).iterchildren():
+                            root.get_element_by_id(key).remove(i)
+                            root.get_element_by_id(key).text = root2.get_element_by_id(element).text
+                    else:
+                        for i,j in izip(root.get_element_by_id(key).iterchildren(),root2.get_element_by_id(element).iterchildren()):
+                            i = j
+                elif root.get_element_by_id(key).getchildren() == []:
+                    if root2.get_element_by_id(element).getchildren() != []:
+                        root.get_element_by_id(key).text = ''
+                        for i in root2.get_element_by_id(element).iterchildren():
+                            root.get_element_by_id(key).append(i)
+                    else:
+                        root.get_element_by_id(key).text = root2.get_element_by_id(element).text		
+                        #                elif root.get_element_by_id(key).tag == 'ul' or root.get_element_by_id(key).tag == 'ol':
+                        #                    for i,j in izip(root.get_element_by_id(key).iterchildren(),root2.get_element_by_id(element).iterchildren()):
+                        #                    	i.text = j.text 
+                        #		else:
+                        #		    root.get_element_by_id(key).text = root2.get_element_by_id(element).text
+        else:
+            return ['<b>No replacement available for the prefered language</b>']
+    else:
+        return ['<b>No replacement available for '+url+'</b>']
+            
+    
+    root.make_links_absolute(url,resolve_base_href=True)              #For getting the CSS and Images.
+    output = tostring(root)
+    #f =  open("%s%s" % (os.path.abspath(os.path.dirname(__file__)), parameter['url'] + '.' + parameter['lang'],'w'))
+    try:
+        os.makedirs(os.path.join(os.path.dirname(__file__),parameter['url'].split(':')[1].split('//')[1]))
+        f = open(os.path.join(os.path.dirname(__file__), parameter['url'].split(':')[1].split('//')[1] + parameter['lang']), 'w')
+        f.write(output)
+        f.close()
+    except OSError:
+        f = open(os.path.join(os.path.dirname(__file__), parameter['url'].split(':')[1].split('//')[1] + parameter['lang']), 'w')
+        f.write(output)
+        f.close()
+        
+    return [output]
